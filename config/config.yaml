@@ -1,0 +1,178 @@
+seed: 42
+project_name: "evidence-aware-fake-news-detection"
+device: "cuda"          # "cuda" | "cpu" | "mps"
+mixed_precision: "bf16" # "no" | "fp16" | "bf16"
+
+paths:
+  raw_data_dir: "data/raw"
+  processed_data_dir: "data/processed"
+  kb_index_dir: "data/kb_index"
+  checkpoint_dir: "checkpoints"
+  log_dir: "logs"
+  cache_dir: ".cache/huggingface"
+
+# ---------------------------------------------------------------------------
+# Module 1: Macro-Context Article Encoder
+# ---------------------------------------------------------------------------
+macro_encoder:
+  model_name: "microsoft/deberta-v3-base"
+  max_seq_length: 512
+  pooling_strategy: "cls"       # "cls" | "mean" | "attention"
+  hidden_dim: 768
+  dropout: 0.1
+  freeze_base_layers: 0          # number of bottom encoder layers to freeze
+  gradient_checkpointing: true
+
+# ---------------------------------------------------------------------------
+# Module 2: Claim Extraction & Filtering
+# ---------------------------------------------------------------------------
+claim_extraction:
+  method: "instruction_tuned_slm"   # "instruction_tuned_slm" | "claimbuster"
+  model_name: "Qwen/Qwen2.5-1.5B-Instruct"
+  max_claims_per_article: 8
+  min_claim_tokens: 4
+  max_claim_tokens: 64
+  filtering:
+    remove_questions: true
+    remove_opinions: true
+    checkworthiness_threshold: 0.55
+  generation:
+    temperature: 0.0
+    max_new_tokens: 256
+    do_sample: false
+
+# ---------------------------------------------------------------------------
+# Module 3: Hybrid Evidence Retrieval
+# ---------------------------------------------------------------------------
+retrieval:
+  knowledge_base:
+    sources: ["kilt_wikipedia", "multifc", "snopes"]
+    chunk_size_tokens: 200
+    chunk_overlap_tokens: 40
+  dense:
+    model_name: "BAAI/bge-large-en-v1.5"
+    embedding_dim: 1024
+    index_type: "IndexFlatIP"
+    normalize_embeddings: true
+    batch_size: 64
+    top_k: 20
+  sparse:
+    algorithm: "BM25Okapi"
+    k1: 1.5
+    b: 0.75
+    top_k: 20
+    tokenizer: "simple_lowercase_regex"
+  fusion:
+    method: "reciprocal_rank_fusion"
+    rrf_k: 60
+    final_top_k: 5
+
+# ---------------------------------------------------------------------------
+# Module 4: Claim-Evidence NLI Cross-Encoder
+# ---------------------------------------------------------------------------
+nli:
+  model_name: "cross-encoder/nli-deberta-v3-base"
+  max_seq_length: 256
+  batch_size: 32
+  label_order: ["entailment", "contradiction", "neutral"]
+
+# ---------------------------------------------------------------------------
+# Module 5: Gated Cross-Attention Fusion
+# ---------------------------------------------------------------------------
+fusion_network:
+  claim_embedding_dim: 768
+  article_embedding_dim: 768
+  fused_dim: 768
+  num_attention_heads: 8
+  attention_dropout: 0.1
+  gating:
+    type: "sigmoid_scalar"
+    input_features: ["h_art", "h_claims"]
+  aggregate_claim_features:
+    - "mean_contradiction"
+    - "max_contradiction"
+    - "retrieval_margin"
+    - "alignment_vector"
+
+# ---------------------------------------------------------------------------
+# Module 6: Classification Head & Uncertainty Gate
+# ---------------------------------------------------------------------------
+classifier:
+  num_labels: 2                # LIKELY_REAL, LIKELY_FAKE
+  hidden_layers: [768, 256]
+  activation: "gelu"
+  dropout: 0.2
+  loss: "binary_cross_entropy"
+  label_smoothing: 0.05
+
+uncertainty_gate:
+  enabled: true
+  evidence_sufficiency_threshold: 0.45   # tau
+  entropy_normalization: "log3"
+  abstain_label: "UNCERTAIN"
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+training:
+  batch_size: 16
+  gradient_accumulation_steps: 2
+  num_epochs: 10
+  learning_rate: 2.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.06
+  lr_scheduler: "linear"
+  optimizer: "adamw_torch"
+  max_grad_norm: 1.0
+  early_stopping:
+    enabled: true
+    patience: 3
+    monitor_metric: "macro_f1"
+    mode: "max"
+  eval_strategy: "epoch"
+  save_strategy: "epoch"
+  save_total_limit: 3
+  logging_steps: 50
+
+# ---------------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------------
+evaluation:
+  metrics: ["accuracy", "macro_f1", "auc_roc", "ece", "brier_score"]
+  cross_domain:
+    train_datasets: ["multifc", "politifact", "gossipcop"]
+    zero_shot_test_datasets: ["liar_new", "covid19_misinfo"]
+  calibration:
+    ece_num_bins: 15
+
+# ---------------------------------------------------------------------------
+# Ablation Flags (toggle components for ablation studies)
+# ---------------------------------------------------------------------------
+ablations:
+  disable_sparse_retrieval: false
+  disable_nli: false
+  disable_gated_fusion: false
+  disable_uncertainty_gate: false
+
+# ---------------------------------------------------------------------------
+# Explainability
+# ---------------------------------------------------------------------------
+explainability:
+  shap:
+    explainer_type: "partition"
+    max_evals: 500
+  attention_extraction:
+    enabled: true
+    layer_index: -1
+
+# ---------------------------------------------------------------------------
+# Serving
+# ---------------------------------------------------------------------------
+serving:
+  api:
+    host: "0.0.0.0"
+    port: 8000
+    workers: 2
+  streamlit:
+    port: 8501
+  request_timeout_seconds: 180

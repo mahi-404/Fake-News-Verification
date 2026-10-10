@@ -1,0 +1,19 @@
+{
+  "label_scheme": "binary",
+  "label_names": {
+    "0": "REAL",
+    "1": "FAKE"
+  },
+  "datasets_included": [
+    "liar",
+    "multifc"
+  ],
+  "split_sizes": {
+    "train": 8130,
+    "val": 1031,
+    "test": 1011
+  },
+  "min_words": 3,
+  "max_words": 200,
+  "seed": 42
+}
